@@ -7,7 +7,7 @@ const mongoose = require('mongoose');
 // =================================================================
 // Database Setup (MongoDB)
 // =================================================================
-const MONGODB_URI = "mongodb+srv://sarwarjahanshohid_db_user:CPlQyNRqiD2CyRNc@cluster0.t1fleow.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0";
+const MONGODB_URI = "mongodb+srv://atifsupermart202199:FGzi4j6kRnYTIyP9@cluster0.bfulggv.mongodb.net/?retryWrites=true&w=majority";
 
 mongoose.connect(MONGODB_URI)
     .then(() => console.log('Successfully connected to MongoDB.'))
