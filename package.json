@@ -1,0 +1,26 @@
+{
+  "name": "iot-motor-controller",
+  "version": "1.0.0",
+  "description": "Real-time IoT Motor Controller Server with MongoDB Logging",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "keywords": [
+    "iot",
+    "esp32",
+    "websocket",
+    "mongodb",
+    "express"
+  ],
+  "author": "shohidmax",
+  "license": "ISC",
+  "dependencies": {
+    "express": "^4.18.2",
+    "mongoose": "^8.0.3",
+    "ws": "^8.16.0"
+  },
+  "engines": {
+    "node": ">=14.0.0"
+  }
+}
