@@ -1,122 +1,68 @@
-const WebSocket = require('ws');
-const http = require('http');
+// server.js
+// =================================================================
+// Simple & Robust WebSocket Relay Server for ESP32
+// =================================================================
+
 const express = require('express');
+const http = require('http');
+const WebSocket = require('ws');
 const path = require('path');
-const mongoose = require('mongoose');
 
-// =================================================================
-// Database Setup (MongoDB)
-// =================================================================
-const MONGODB_URI = "mongodb+srv://atifsupermart202199:FGzi4j6kRnYTIyP9@cluster0.bfulggv.mongodb.net/?retryWrites=true&w=majority";
-
-mongoose.connect(MONGODB_URI)
-    .then(() => console.log('Successfully connected to MongoDB.'))
-    .catch(err => console.error('MongoDB connection error:', err));
-
-const motorLogSchema = new mongoose.Schema({
-    onTime: { type: Date, required: true },
-    offTime: { type: Date },
-    duration: { type: String }
-});
-
-const MotorLog = mongoose.model('MotorLog', motorLogSchema);
-
-
-// =================================================================
-// Server Setup
-// =================================================================
 const app = express();
-const server = http.createServer(app);
+// 'public' ফোল্ডারে আপনার HTML ফাইলটি রাখুন
 app.use(express.static(path.join(__dirname, 'public')));
+
+const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
 
-let esp32Client = null;
-const webClients = new Set();
-let lastKnownMotorStatus = 'OFF';
+let esp32Socket = null; // ESP32 এর কানেকশন রাখার জন্য
 
 wss.on('connection', (ws) => {
-    console.log('A client connected.');
+    console.log('A new client connected.');
 
-    ws.on('message', async (message) => {
+    ws.on('message', (message) => {
         let data;
-        try { data = JSON.parse(message); } catch (e) { return; }
+        try {
+            // gelen mesajın string olup olmadığını kontrol et
+            data = JSON.parse(message.toString());
+        } catch (e) {
+            console.error('Failed to parse JSON:', e);
+            return;
+        }
 
-        // --- Message handling logic ---
-        
+        // Identify the client type
         if (data.type === 'esp32-identify') {
-            console.log('ESP32 client identified.');
-            esp32Client = ws;
-            webClients.forEach(client => client.send(JSON.stringify({ type: 'espStatus', status: 'online' })));
-        
-        } else if (data.type === 'statusUpdate' && ws === esp32Client) {
-            const newStatus = data.payload.motorStatus;
-
-            if (newStatus !== lastKnownMotorStatus) {
-                console.log(`Motor status changed from ${lastKnownMotorStatus} to ${newStatus}`);
-                if (newStatus === 'ON') {
-                    const newLog = new MotorLog({ onTime: new Date() });
-                    await newLog.save();
-                    console.log('New log created for ON event.');
-                } else { // Status is now OFF
-                    const lastLog = await MotorLog.findOne({ offTime: null }).sort({ onTime: -1 });
-                    if (lastLog) {
-                        lastLog.offTime = new Date();
-                        const durationSeconds = Math.round((lastLog.offTime - lastLog.onTime) / 1000);
-                        lastLog.duration = formatDuration(durationSeconds);
-                        await lastLog.save();
-                        console.log('Log updated for OFF event. Duration:', lastLog.duration);
-                    }
+            console.log('ESP32 device connected.');
+            esp32Socket = ws;
+            ws.isEsp32 = true;
+        } 
+        else if (data.type === 'statusUpdate' && ws.isEsp32) {
+            // ESP32 থেকে স্ট্যাটাস আসলে, সকল ড্যাশবোর্ড ক্লায়েন্টকে পাঠানো হবে
+            wss.clients.forEach((client) => {
+                if (!client.isEsp32 && client.readyState === WebSocket.OPEN) {
+                    client.send(JSON.stringify({ type: 'statusUpdate', payload: data.payload }));
                 }
-                lastKnownMotorStatus = newStatus;
+            });
+        }
+        else if (data.type === 'command') {
+            // ড্যাশবোর্ড থেকে কমান্ড আসলে, ESP32-কে পাঠানো হবে
+            if (esp32Socket && esp32Socket.readyState === WebSocket.OPEN) {
+                console.log('Forwarding command to ESP32:', data);
+                esp32Socket.send(JSON.stringify(data));
             }
-            webClients.forEach(client => client.send(message.toString()));
-
-        } else if (data.type === 'command' && (data.command === 'GET_ALL_LOGS' || data.command === 'GET_LOG_PAGE')) {
-            const logs = await MotorLog.find().sort({ onTime: -1 }).limit(100);
-            const formattedLogs = logs.map(log => ({
-                onTime: new Date(log.onTime).toLocaleString('en-BD', { timeZone: 'Asia/Dhaka' }),
-                offTime: log.offTime ? new Date(log.offTime).toLocaleString('en-BD', { timeZone: 'Asia/Dhaka' }) : 'N/A',
-                duration: log.duration || 'Running...'
-            }));
-            ws.send(JSON.stringify({ type: 'allLogsUpdate', payload: { motorLogs: formattedLogs } }));
-
-        } else if (data.type === 'command') {
-            if (esp32Client) {
-                esp32Client.send(message.toString());
-            }
-        } else {
-             if (!webClients.has(ws)) {
-                webClients.add(ws);
-                const espStatus = esp32Client ? 'online' : 'offline';
-                ws.send(JSON.stringify({ type: 'espStatus', status: espStatus }));
-             }
         }
     });
 
     ws.on('close', () => {
-        if (ws === esp32Client) {
-            console.log('ESP32 client disconnected.');
-            esp32Client = null;
-            webClients.forEach(client => client.send(JSON.stringify({ type: 'espStatus', status: 'offline' })));
-        } else {
-            webClients.delete(ws);
-            console.log('Web client disconnected.');
+        console.log('Client disconnected.');
+        if (ws.isEsp32) {
+            esp32Socket = null;
+            console.log('ESP32 device disconnected.');
         }
     });
 });
 
-function formatDuration(totalSeconds) {
-    if (totalSeconds < 60) return `${totalSeconds}s`;
-    const hours = Math.floor(totalSeconds / 3600);
-    totalSeconds %= 3600;
-    const minutes = Math.floor(totalSeconds / 60);
-    const seconds = totalSeconds % 60;
-    let durationString = "";
-    if (hours > 0) durationString += `${hours}h `;
-    if (minutes > 0) durationString += `${minutes}m `;
-    durationString += `${seconds}s`;
-    return durationString;
-}
-
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => console.log(`Server is listening on port ${PORT}`));
+server.listen(PORT, () => {
+    console.log(`Server is listening on port ${PORT}`);
+});
