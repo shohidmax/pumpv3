@@ -1,64 +1,86 @@
-// server.js
-// =================================================================
-// Simple & Robust WebSocket Relay Server for ESP32
-// =================================================================
-
-const express = require('express');
-const http = require('http');
 const WebSocket = require('ws');
+const http = require('http');
+const express = require('express');
 const path = require('path');
 
 const app = express();
-// 'public' ফোল্ডারে আপনার HTML ফাইলটি রাখুন
+const server = http.createServer(app);
+
 app.use(express.static(path.join(__dirname, 'public')));
 
-const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
 
-let esp32Socket = null; // ESP32 এর কানেকশন রাখার জন্য
+let esp32Client = null;
+const webClients = new Set();
 
 wss.on('connection', (ws) => {
-    console.log('A new client connected.');
+    console.log('A client connected. Waiting for identification...');
+
+    ws.isIdentified = false;
+
+    const identificationTimeout = setTimeout(() => {
+        if (!ws.isIdentified) {
+            console.log('Client did not identify. Assuming it is a web client.');
+            webClients.add(ws);
+            ws.isIdentified = true;
+            const espStatus = (esp32Client && esp32Client.readyState === WebSocket.OPEN) ? 'online' : 'offline';
+            ws.send(JSON.stringify({ type: 'espStatus', status: espStatus }));
+        }
+    }, 2000);
 
     ws.on('message', (message) => {
         let data;
         try {
-            // gelen mesajın string olup olmadığını kontrol et
-            data = JSON.parse(message.toString());
+            data = JSON.parse(message);
         } catch (e) {
-            console.error('Failed to parse JSON:', e);
+            console.error('Invalid JSON received:', message.toString());
             return;
         }
 
-        // Identify the client type
-        if (data.type === 'esp32-identify') {
-            console.log('ESP32 device connected.');
-            esp32Socket = ws;
-            ws.isEsp32 = true;
-        } 
-        else if (data.type === 'statusUpdate' && ws.isEsp32) {
-            // ESP32 থেকে স্ট্যাটাস আসলে, সকল ড্যাশবোর্ড ক্লায়েন্টকে পাঠানো হবে
-            wss.clients.forEach((client) => {
-                if (!client.isEsp32 && client.readyState === WebSocket.OPEN) {
-                    client.send(JSON.stringify({ type: 'statusUpdate', payload: data.payload }));
+        if (data.type === 'esp32-identify' && !ws.isIdentified) {
+            clearTimeout(identificationTimeout);
+            console.log('ESP32 client identified.');
+            esp32Client = ws;
+            ws.isIdentified = true;
+            
+            webClients.forEach(client => {
+                if (client.readyState === WebSocket.OPEN) {
+                    client.send(JSON.stringify({ type: 'espStatus', status: 'online' }));
                 }
             });
-        }
-        else if (data.type === 'command') {
-            // ড্যাশবোর্ড থেকে কমান্ড আসলে, ESP32-কে পাঠানো হবে
-            if (esp32Socket && esp32Socket.readyState === WebSocket.OPEN) {
-                console.log('Forwarding command to ESP32:', data);
-                esp32Socket.send(JSON.stringify(data));
+
+        } else if (data.type === 'command' && ws !== esp32Client) {
+            if (esp32Client && esp32Client.readyState === WebSocket.OPEN) {
+                console.log('Forwarding command to ESP32:', message.toString());
+                esp32Client.send(message.toString());
             }
+        } else if ((data.type === 'statusUpdate' || data.type === 'allLogsUpdate' || data.type === 'logPageUpdate') && ws === esp32Client) {
+            webClients.forEach(client => {
+                if (client.readyState === WebSocket.OPEN) {
+                    client.send(message.toString());
+                }
+            });
         }
     });
 
     ws.on('close', () => {
-        console.log('Client disconnected.');
-        if (ws.isEsp32) {
-            esp32Socket = null;
-            console.log('ESP32 device disconnected.');
+        clearTimeout(identificationTimeout);
+        if (ws === esp32Client) {
+            console.log('ESP32 client disconnected.');
+            esp32Client = null;
+            webClients.forEach(client => {
+                if (client.readyState === WebSocket.OPEN) {
+                    client.send(JSON.stringify({ type: 'espStatus', status: 'offline' }));
+                }
+            });
+        } else {
+            webClients.delete(ws);
+            console.log('Web client disconnected.');
         }
+    });
+
+    ws.on('error', (error) => {
+        console.error('WebSocket error:', error);
     });
 });
 
@@ -66,3 +88,4 @@ const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
     console.log(`Server is listening on port ${PORT}`);
 });
+
