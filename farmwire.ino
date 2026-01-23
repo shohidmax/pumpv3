@@ -13,7 +13,7 @@
 #include <vector>
 
 // --- Configuration ---
-const char* websocket_server_host = "pumpv3-jpu6.onrender.com";
+const char* websocket_server_host = "abbu_pump.espserver.site";
 const uint16_t websocket_server_port = 443;
 #define WDT_TIMEOUT 30 // 30 Seconds Watchdog
 
@@ -262,15 +262,19 @@ void setup() {
     Serial.println("Waiting for time sync...");
     // Give time to sync but don't block too long
     unsigned long startSync = millis();
-    while (time(nullptr) < 100000 && millis() - startSync < 5000) {
-        delay(100);
+    while (time(nullptr) < 100000 && millis() - startSync < 10000) { // Increased to 10s
+        Serial.print(".");
+        delay(500);
     }
+    Serial.println();
     Serial.println("Time: " + getFormattedTime());
 
     // Check for update ONCE at startup
     checkForFirmwareUpdate();
     
     // WebSocket Setup
+    // Note: WebSocketsClient doesn't strictly validate certs by default in some versions, 
+    // but connection issues can often be network related.
     webSocket.beginSSL(websocket_server_host, websocket_server_port, "/");
     webSocket.onEvent(webSocketEvent);
     webSocket.setReconnectInterval(5000);
@@ -349,8 +353,10 @@ void checkForFirmwareUpdate() {
   if (WiFi.status() != WL_CONNECTED) return;
 
   String latestVersion = fetchLatestVersion();
+  Serial.println("Latest Version Fetch Result: " + latestVersion);
+  
   if (latestVersion == "") {
-    Serial.println("Failed to fetch latest version");
+    Serial.println("Failed to fetch latest version (Empty response)");
     return;
   }
 
@@ -367,9 +373,17 @@ void checkForFirmwareUpdate() {
 }
 
 String fetchLatestVersion() {
+  WiFiClientSecure client;
+  client.setInsecure(); // Disable certificate validation for robustness
+  
   HTTPClient http;
-  http.setTimeout(10000); 
-  http.begin(versionUrl);
+  http.setTimeout(15000); 
+  
+  // Use the secure client
+  if (!http.begin(client, versionUrl)) {
+      Serial.println("Failed to start HTTP connection");
+      return "";
+  }
 
   int httpCode = http.GET();
   if (httpCode == HTTP_CODE_OK) {
@@ -385,10 +399,17 @@ String fetchLatestVersion() {
 }
 
 void downloadAndApplyFirmware() {
+  WiFiClientSecure client;
+  client.setInsecure(); // Disable certificate validation for robustness
+
   HTTPClient http;
   http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
-  http.setTimeout(15000); 
-  http.begin(firmwareUrl);
+  http.setTimeout(30000); // Increased timeout for download
+  
+  if (!http.begin(client, firmwareUrl)) {
+      Serial.println("Failed to start HTTP connection for firmware");
+      return;
+  }
 
   int httpCode = http.GET();
   Serial.printf("HTTP GET code: %d\n", httpCode);
@@ -398,6 +419,10 @@ void downloadAndApplyFirmware() {
     Serial.printf("Firmware size: %d bytes\n", contentLength);
 
     if (contentLength > 0) {
+        // Note: Update.writeStream() is often easier but we use custom loop for wdt
+        // We can pass the 'client' directly if we cast or extract stream
+        // But http.getStreamPtr() returns WiFiClient* which is compatible
+        
       WiFiClient* stream = http.getStreamPtr();
       if (startOTAUpdate(stream, contentLength)) {
         Serial.println("OTA update successful, restarting...");
