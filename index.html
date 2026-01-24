@@ -182,7 +182,7 @@
     }
 
     function connect() {
-        const wsUrl = 'wss://abbu_pump.espserver.site';
+        const wsUrl = 'wss://pumpv3-jpu6.onrender.com';
         ws = new WebSocket(wsUrl);
         
         ws.onopen = () => { updateStatus('connectionStatus', 'Connected', 'badge-success'); };

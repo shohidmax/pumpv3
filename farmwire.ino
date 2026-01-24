@@ -1,5 +1,5 @@
 // =================================================================
-// ESP32 Simple WebSocket Client - Fixed & Optimized
+// ESP32 Simple WebSocket Client - Fixed & Optimized (Always Connected)
 // =================================================================
 
 #include <WiFi.h>
@@ -9,24 +9,18 @@
 #include <HTTPClient.h>
 #include <Update.h>
 #include <esp_task_wdt.h>
-#include <time.h>
-#include <vector>
 
 // --- Configuration ---
-const char* websocket_server_host = "abbu_pump.espserver.site";
+const char* websocket_server_host = "pumpv3-jpu6.onrender.com";
 const uint16_t websocket_server_port = 443;
 #define WDT_TIMEOUT 30 // 30 Seconds Watchdog
 
+// Updated URLs from your latest code
 const char* firmwareUrl = "https://github.com/shohidmax/pumpv3/releases/download/shohidpump/abbu_pump_online.ino.bin";
 const char* versionUrl = "https://raw.githubusercontent.com/shohidmax/pumpv3/refs/heads/main/version.txt";
 
 // Current firmware version
-const char* currentFirmwareVersion = "1.1.4"; // Incremented version for fix
-
-// Time Configuration (UTC+6 for Bangladesh)
-const char* ntpServer = "pool.ntp.org";
-const long  gmtOffset_sec = 21600;
-const int   daylightOffset_sec = 0;
+const char* currentFirmwareVersion = "1.1.1";
 
 // Timers
 unsigned long lastUpdateCheck = 0;
@@ -38,16 +32,9 @@ const unsigned long wifiCheckInterval = 10000; // Check WiFi every 10 seconds
 // --- PIN DEFINITIONS ---
 #define RELAY_1 12
 #define RELAY_2 14
-#define RELAY_3 13 // Renamed from relay_3 for consistency
+#define relay_3 13
 #define SWITCH_1 19
 #define SWITCH_2 18
-
-// --- DATA STRUCTURES ---
-struct MotorLog {
-    String onTime;
-    String offTime;
-    String duration;
-};
 
 // --- GLOBAL VARIABLES ---
 WebSocketsClient webSocket;
@@ -61,38 +48,13 @@ String lastMotorStat = "";
 String lastSysMode = "";
 int lastWifiSignal = 0;
 
-std::vector<MotorLog> motorLogs;
-const int MAX_LOGS = 50; // Limit logs to save RAM
-
-String relay1_startTimeStr = ""; // To store formatted start time
-
 // --- FORWARD DECLARATIONS ---
 void checkForFirmwareUpdate();
 String fetchLatestVersion();
 void downloadAndApplyFirmware();
 bool startOTAUpdate(WiFiClient* client, int contentLength);
-String getFormattedTime();
-void addLog(String onTime, String offTime, String duration);
-void sendLogPage(int page);
 
 // --- FUNCTIONS ---
-
-String getFormattedTime() {
-    struct tm timeinfo;
-    if(!getLocalTime(&timeinfo)){
-        return "N/A";
-    }
-    char timeStringBuff[30];
-    strftime(timeStringBuff, sizeof(timeStringBuff), "%Y-%m-%d %H:%M:%S", &timeinfo);
-    return String(timeStringBuff);
-}
-
-void addLog(String onTime, String offTime, String duration) {
-    if (motorLogs.size() >= MAX_LOGS) {
-        motorLogs.erase(motorLogs.begin()); // Remove oldest
-    }
-    motorLogs.push_back({onTime, offTime, duration});
-}
 
 void sendStatus() {
     String currentMotor = (digitalRead(SWITCH_1) == LOW) ? "ON" : "OFF";
@@ -123,52 +85,6 @@ void sendStatus() {
     }
 }
 
-void sendLogPage(int page) {
-    int itemsPerPage = 10;
-    int totalLogs = motorLogs.size();
-    int totalPages = (totalLogs + itemsPerPage - 1) / itemsPerPage;
-    if (totalPages == 0) totalPages = 1;
-
-    if (page < 0) page = 0;
-    if (page >= totalPages) page = totalPages - 1;
-
-    JsonDocument doc;
-    doc["type"] = "logPageUpdate";
-    JsonObject payload = doc.createNestedObject("payload");
-    
-    payload["currentPage"] = page;
-    payload["totalPages"] = totalPages;
-    
-    JsonArray logsArray = payload.createNestedArray("motorLogs");
-    
-    // Iterate backwards to show newest first
-    int startIdx = totalLogs - 1 - (page * itemsPerPage);
-    int endIdx = startIdx - itemsPerPage + 1;
-    if (endIdx < 0) endIdx = 0;
-
-    for (int i = startIdx; i >= endIdx && i >= 0; i--) {
-        if (i < motorLogs.size()) { // Safety check
-            JsonObject logItem = logsArray.createNestedObject();
-            JsonDocument logJson; // Needed to serialize inside the array as string if client expects strings, 
-                                  // OR just send objects. The JS client parses payload.motorLogs entries.
-                                  // Client JS: JSON.parse(logString); inside the loop.
-                                  // So we need to push a STRINGIFIED JSON object.
-            
-            logJson["onTime"] = motorLogs[i].onTime;
-            logJson["offTime"] = motorLogs[i].offTime;
-            logJson["duration"] = motorLogs[i].duration;
-            
-            String logString;
-            serializeJson(logJson, logString);
-            logsArray.add(logString);
-        }
-    }
-
-    String output;
-    serializeJson(doc, output);
-    webSocket.sendTXT(output);
-}
-
 void webSocketEvent(WStype_t type, uint8_t * payload, size_t length) {
     esp_task_wdt_reset(); // Reset Watchdog on activity
     switch(type) {
@@ -187,16 +103,11 @@ void webSocketEvent(WStype_t type, uint8_t * payload, size_t length) {
                 if (command == "RELAY_1") {
                     digitalWrite(RELAY_1, HIGH);
                     relay1_timer = millis();
-                    relay1_startTimeStr = getFormattedTime(); // Capture start time
                 } else if (command == "RELAY_2") {
                     digitalWrite(RELAY_2, HIGH);
                     relay2_timer = millis();
-                    // Relay 2 is STOP. If Motor was ON, we need to log.
-                    // But typically logs are generated when status changes.
-                    // We will handle logging in the loop based on status change or explicit STOP command?
-                    // Use SWITCH_1 status for robust logging.
                 } else if (command == "RESET") {
-                    digitalWrite(RELAY_3, HIGH);
+                    digitalWrite(relay_3, HIGH);
                     relay3_timer = millis();
                 } else if (command == "RESTART_ESP") {
                     webSocket.disconnect();
@@ -204,14 +115,7 @@ void webSocketEvent(WStype_t type, uint8_t * payload, size_t length) {
                     ESP.restart();
                 } else if (command == "CHECK_UPDATE") {
                     checkForFirmwareUpdate();
-                } else if (command == "GET_LOG_PAGE") {
-                    int page = doc["value"] | 0;
-                    sendLogPage(page);
-                } else if (command == "CLEAR_LOGS") {
-                    motorLogs.clear();
-                    sendLogPage(0); // Send empty page
                 }
-                
                 // Send immediate update after command
                 lastStatusUpdate = 0; // Force update
             }
@@ -226,16 +130,13 @@ void setup() {
     // Initialize Pins
     pinMode(RELAY_1, OUTPUT); digitalWrite(RELAY_1, LOW);
     pinMode(RELAY_2, OUTPUT); digitalWrite(RELAY_2, LOW);
-    pinMode(RELAY_3, OUTPUT); digitalWrite(RELAY_3, LOW);
+    pinMode(relay_3, OUTPUT); digitalWrite(relay_3, LOW);
     pinMode(SWITCH_1, INPUT_PULLUP);
     pinMode(SWITCH_2, INPUT_PULLUP);
 
-    // Watchdog Setup (FIXED)
-    // Deinit first to avoid "TWDT already initialized" error
-    esp_task_wdt_deinit(); 
-    
+    // Watchdog Setup (Initialize early to catch boot loops)
     esp_task_wdt_config_t wdt_config = {
-        .timeout_ms = WDT_TIMEOUT * 1000, // Corrected to ms (30000ms)
+        .timeout_ms = WDT_TIMEOUT * 1000,
         .idle_core_mask = (1 << portNUM_PROCESSORS) - 1,
         .trigger_panic = true
     };
@@ -244,6 +145,9 @@ void setup() {
 
     // WiFi Setup
     WiFi.mode(WIFI_STA);
+    WiFi.setAutoReconnect(true); // Enable Auto Reconnect Hardware Level
+    WiFi.persistent(true);       // Save WiFi settings
+    
     WiFiManager wm;
     wm.setConfigPortalTimeout(180); // 3 Minutes timeout for hotspot
 
@@ -254,52 +158,33 @@ void setup() {
     }
 
     Serial.println("WiFi Connected!");
-    Serial.println("IP: " + WiFi.localIP().toString());
     Serial.println("Current Version: " + String(currentFirmwareVersion));
-
-    // Time Setup
-    configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
-    Serial.println("Waiting for time sync...");
-    // Give time to sync but don't block too long
-    unsigned long startSync = millis();
-    while (time(nullptr) < 100000 && millis() - startSync < 10000) { // Increased to 10s
-        Serial.print(".");
-        delay(500);
-    }
-    Serial.println();
-    Serial.println("Time: " + getFormattedTime());
 
     // Check for update ONCE at startup
     checkForFirmwareUpdate();
     
     // WebSocket Setup
-    // Note: WebSocketsClient doesn't strictly validate certs by default in some versions, 
-    // but connection issues can often be network related.
     webSocket.beginSSL(websocket_server_host, websocket_server_port, "/");
     webSocket.onEvent(webSocketEvent);
     webSocket.setReconnectInterval(5000);
 }
 
-// Global state for logging based on actual motor status (SWITCH_1)
-bool lastMotorStateOn = false;
-unsigned long motorStartTime = 0;
-String motorStartTimeStr = "";
-
 void loop() {
     esp_task_wdt_reset(); // Keep device alive
     webSocket.loop();
 
-    // WiFi Check
+    // FIXED: Smart Reconnect Logic
+    // এটি প্রতি ১০ সেকেন্ডে চেক করবে কানেকশন আছে কিনা। না থাকলে রিকানেক্ট করবে।
+    // এটি লুপ আটকে রাখবে না।
     if (millis() - lastWifiCheck > wifiCheckInterval) {
         lastWifiCheck = millis();
         if (WiFi.status() != WL_CONNECTED) {
             Serial.println("WiFi Lost! Attempting reconnect...");
-            WiFi.disconnect();
-            WiFi.reconnect();
+            WiFi.reconnect(); // DO NOT USE disconnect() here
         }
     }
 
-    // Handle Relay Timers
+    // Handle Relay Timers (Non-blocking)
     unsigned long currentMillis = millis();
     if (relay1_timer > 0 && currentMillis - relay1_timer >= relay_duration) {
         digitalWrite(RELAY_1, LOW); relay1_timer = 0;
@@ -308,40 +193,7 @@ void loop() {
         digitalWrite(RELAY_2, LOW); relay2_timer = 0;
     }
     if (relay3_timer > 0 && currentMillis - relay3_timer >= relay_duration) {
-        digitalWrite(RELAY_3, LOW); relay3_timer = 0;
-    }
-
-    // Logic to Generate Logs based on SWITCH_1 (Feedback)
-    // SWITCH_1 is LOW when Motor is ON (INPUT_PULLUP logic from original code seems to imply logic)
-    // Line 59: String currentMotor = (digitalRead(SWITCH_1) == LOW) ? "ON" : "OFF";
-    bool currentMotorStateOn = (digitalRead(SWITCH_1) == LOW);
-
-    if (currentMotorStateOn && !lastMotorStateOn) {
-        // Motor Just Started
-        motorStartTime = millis();
-        motorStartTimeStr = getFormattedTime();
-        lastMotorStateOn = true;
-    } else if (!currentMotorStateOn && lastMotorStateOn) {
-        // Motor Just Stopped
-        unsigned long durationMillis = millis() - motorStartTime;
-        unsigned long durationSeconds = durationMillis / 1000;
-        
-        int hours = durationSeconds / 3600;
-        int minutes = (durationSeconds % 3600) / 60;
-        int seconds = durationSeconds % 60;
-        char durationStr[20];
-        snprintf(durationStr, sizeof(durationStr), "%02dh %02dm %02ds", hours, minutes, seconds);
-
-        String offTimeStr = getFormattedTime();
-        
-        // Add to log
-        addLog(motorStartTimeStr, offTimeStr, String(durationStr));
-        Serial.println("Log Added: " + motorStartTimeStr + " - " + offTimeStr);
-        
-        // Notify clients of new logs
-        sendLogPage(0); // Refresh first page
-        
-        lastMotorStateOn = false;
+        digitalWrite(relay_3, LOW); relay3_timer = 0;
     }
 
     // Check Status and Send Update
@@ -352,20 +204,20 @@ void checkForFirmwareUpdate() {
   Serial.println("Checking for firmware update...");
   if (WiFi.status() != WL_CONNECTED) return;
 
+  // Step 1: Fetch the latest version
   String latestVersion = fetchLatestVersion();
-  Serial.println("Latest Version Fetch Result: " + latestVersion);
-  
   if (latestVersion == "") {
-    Serial.println("Failed to fetch latest version (Empty response)");
+    Serial.println("Failed to fetch latest version");
     return;
   }
 
   Serial.println("Current: " + String(currentFirmwareVersion));
   Serial.println("Latest: " + latestVersion);
 
+  // Step 2: Compare versions
   if (latestVersion != currentFirmwareVersion) {
     Serial.println("New firmware available. Starting OTA update...");
-    esp_task_wdt_reset(); 
+    esp_task_wdt_reset(); // Reset WDT before heavy task
     downloadAndApplyFirmware();
   } else {
     Serial.println("Device is up to date.");
@@ -373,17 +225,9 @@ void checkForFirmwareUpdate() {
 }
 
 String fetchLatestVersion() {
-  WiFiClientSecure client;
-  client.setInsecure(); // Disable certificate validation for robustness
-  
   HTTPClient http;
-  http.setTimeout(15000); 
-  
-  // Use the secure client
-  if (!http.begin(client, versionUrl)) {
-      Serial.println("Failed to start HTTP connection");
-      return "";
-  }
+  http.setTimeout(10000); // 10s Timeout
+  http.begin(versionUrl);
 
   int httpCode = http.GET();
   if (httpCode == HTTP_CODE_OK) {
@@ -399,17 +243,10 @@ String fetchLatestVersion() {
 }
 
 void downloadAndApplyFirmware() {
-  WiFiClientSecure client;
-  client.setInsecure(); // Disable certificate validation for robustness
-
   HTTPClient http;
   http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
-  http.setTimeout(30000); // Increased timeout for download
-  
-  if (!http.begin(client, firmwareUrl)) {
-      Serial.println("Failed to start HTTP connection for firmware");
-      return;
-  }
+  http.setTimeout(15000); 
+  http.begin(firmwareUrl);
 
   int httpCode = http.GET();
   Serial.printf("HTTP GET code: %d\n", httpCode);
@@ -419,10 +256,6 @@ void downloadAndApplyFirmware() {
     Serial.printf("Firmware size: %d bytes\n", contentLength);
 
     if (contentLength > 0) {
-        // Note: Update.writeStream() is often easier but we use custom loop for wdt
-        // We can pass the 'client' directly if we cast or extract stream
-        // But http.getStreamPtr() returns WiFiClient* which is compatible
-        
       WiFiClient* stream = http.getStreamPtr();
       if (startOTAUpdate(stream, contentLength)) {
         Serial.println("OTA update successful, restarting...");
@@ -452,21 +285,22 @@ bool startOTAUpdate(WiFiClient* client, int contentLength) {
   int progress = 0;
   int lastProgress = 0;
 
-  const unsigned long timeoutDuration = 120 * 1000; 
+  const unsigned long timeoutDuration = 120 * 1000; // 2 Minutes
   unsigned long lastDataTime = millis();
 
   while (written < contentLength) {
-    esp_task_wdt_reset(); 
+    esp_task_wdt_reset(); // CRITICAL: Prevent Watchdog Reset during OTA
 
     if (client->available()) {
-      uint8_t buffer[256]; 
+      uint8_t buffer[256];
       size_t len = client->read(buffer, sizeof(buffer));
       if (len > 0) {
         Update.write(buffer, len);
         written += len;
         
-        lastDataTime = millis(); 
+        lastDataTime = millis(); // Reset timeout on data
 
+        // Calculate and print progress
         progress = (written * 100) / contentLength;
         if (progress != lastProgress) {
           Serial.printf("Progress: %d%%\n", progress);
@@ -475,13 +309,14 @@ bool startOTAUpdate(WiFiClient* client, int contentLength) {
       }
     }
     
+    // Check for timeout
     if (millis() - lastDataTime > timeoutDuration) {
       Serial.println("Error: Connection timed out during update.");
       Update.abort();
       return false;
     }
 
-    yield(); 
+    yield();
   }
 
   if (written != contentLength) {
