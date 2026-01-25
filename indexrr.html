@@ -1,5 +1,4 @@
-<!-- ////https://abbu_pver.site/ -->
- <!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="en" data-theme="light">
 <head>
     <meta charset="UTF-8">
@@ -107,18 +106,6 @@
                                         <button onclick="showActionConfirmation('CLEAR_LOGS', 'Are you sure you want to delete all activity logs?')" class="btn btn-xs btn-error control-btn" disabled>Delete All</button>
                                     </div>
                                 </div>
-                                
-                                <!-- Filter Controls -->
-                                <div class="flex flex-wrap gap-2 mb-4 items-center justify-center sm:justify-start bg-base-100 p-2 rounded-lg">
-                                    <input type="date" id="startDate" class="input input-sm input-bordered" />
-                                    <span class="text-sm font-bold">to</span>
-                                    <input type="date" id="endDate" class="input input-sm input-bordered" />
-                                    <button onclick="applyFilter()" class="btn btn-sm btn-primary control-btn">Filter</button>
-                                    <button onclick="reloadLogs()" class="btn btn-sm btn-ghost control-btn" title="Reload Logs">
-                                        <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" /></svg>
-                                    </button>
-                                </div>
-
                                 <div class="overflow-x-auto h-64">
                                     <table class="table table-xs sm:table-sm">
                                         <thead><tr><th>ON Time</th><th>OFF Time</th><th>Duration</th></tr></thead>
@@ -128,7 +115,7 @@
                                 <div id="pagination-controls" class="text-center mt-4 hidden">
                                     <div class="join"><button id="prevBtn" onclick="requestLogPage(logCurrentPage - 1)" class="join-item btn btn-sm">«</button><button class="join-item btn btn-sm">Page <span id="currentPage">1</span> of <span id="totalPages">1</span></button><button id="nextBtn" onclick="requestLogPage(logCurrentPage + 1)" class="join-item btn btn-sm">»</button></div>
                                 </div>
-                                <div class="text-center mt-4" id="loadDataContainer"><button id="loadDataBtn" onclick="reloadLogs()" class="btn btn-sm btn-outline control-btn" disabled>Load Data</button></div>
+                                <div class="text-center mt-4" id="loadDataContainer"><button id="loadDataBtn" onclick="handleLoadDataClick()" class="btn btn-sm btn-outline control-btn" disabled>Load Data</button></div>
                             </div>
                         </div>
                     </div>
@@ -166,7 +153,6 @@
     let logCurrentPage = 0;
     let logTotalPages = 1;
 
-    // ... (Existing Theme & Toast Logic) ...
     const themeToggle = document.getElementById('theme-toggle');
     const currentTheme = localStorage.getItem('theme') || 'light';
     document.documentElement.setAttribute('data-theme', currentTheme);
@@ -196,7 +182,7 @@
     }
 
     function connect() {
-        const wsUrl = 'wss://abbu_pump.espserver.site';
+        const wsUrl = 'wss://pumpv3-jpu6.onrender.com';
         ws = new WebSocket(wsUrl);
         
         ws.onopen = () => { updateStatus('connectionStatus', 'Connected', 'badge-success'); };
@@ -226,9 +212,9 @@
         ws.onerror = (error) => { ws.close(); };
     }
 
-    function sendCommand(command, value = null, extras = {}) {
+    function sendCommand(command, value = null) {
         if (ws && ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify({ type: 'command', command, value, ...extras }));
+            ws.send(JSON.stringify({ type: 'command', command, value }));
         } else { showToast('Not connected to server', 'error'); }
     }
 
@@ -238,28 +224,15 @@
         action_modal.showModal();
     }
     
-    function applyFilter() {
-        requestLogPage(0);
-    }
-
-    function reloadLogs() {
-        document.getElementById('startDate').value = '';
-        document.getElementById('endDate').value = '';
+    function handleLoadDataClick() {
+        const btn = document.getElementById('loadDataBtn');
+        btn.disabled = true;
+        btn.innerHTML = `<span class="loading loading-spinner"></span> Loading...`;
         requestLogPage(0);
     }
     
     function requestLogPage(page) {
-        const startDate = document.getElementById('startDate').value;
-        const endDate = document.getElementById('endDate').value;
-        
-        const loadDataBtn = document.getElementById('loadDataBtn');
-        if(loadDataBtn) {
-            btn = loadDataBtn;
-            btn.disabled = true;
-            btn.innerHTML = `<span class="loading loading-spinner"></span> Loading...`;
-        }
-
-        sendCommand('GET_LOG_PAGE', page, { startDate, endDate });
+        sendCommand('GET_LOG_PAGE', page);
     }
 
     function saveWsHost() {

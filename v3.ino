@@ -9,6 +9,8 @@
 #include <HTTPClient.h>
 #include <Update.h>
 #include <esp_task_wdt.h>
+#include <nvs_flash.h>
+
 
 // --- Configuration ---
 const char* websocket_server_host = "pumpv3-jpu6.onrender.com";
@@ -16,11 +18,12 @@ const uint16_t websocket_server_port = 443;
 #define WDT_TIMEOUT 30 // 30 Seconds Watchdog
 
 // Updated URLs from your latest code
+// Updated URLs from your latest code
 const char* firmwareUrl = "https://github.com/shohidmax/pumpv3/releases/download/shohidpump/abbu_pump_online.ino.bin";
 const char* versionUrl = "https://raw.githubusercontent.com/shohidmax/pumpv3/refs/heads/main/version.txt";
 
 // Current firmware version
-const char* currentFirmwareVersion = "1.1.3";
+const char* currentFirmwareVersion = "1.1.9";
 
 // Timers
 unsigned long lastUpdateCheck = 0;
@@ -35,7 +38,6 @@ const unsigned long wifiCheckInterval = 10000; // Check WiFi every 10 seconds
 #define relay_3 13
 #define SWITCH_1 23
 #define SWITCH_2 22
-
 // --- GLOBAL VARIABLES ---
 WebSocketsClient webSocket;
 unsigned long relay1_timer = 0;
@@ -56,12 +58,47 @@ bool startOTAUpdate(WiFiClient* client, int contentLength);
 
 // --- FUNCTIONS ---
 
+// Debounce Variables
+unsigned long lastDebounceTime = 0;
+unsigned long debounceDelay = 200; // 200ms debounce
+String stableMotorState = "OFF";
+
 void sendStatus() {
-    String currentMotor = (digitalRead(SWITCH_1) == LOW) ? "ON" : "OFF";
-    String currentMode = (digitalRead(SWITCH_2) == LOW) ? "Normal" : "Emergency";//Emergency Normal
+    String reading = (digitalRead(SWITCH_1) == LOW) ? "ON" : "OFF";
+    String currentMode = (digitalRead(SWITCH_2) == LOW) ? "Normal" : "Emergency";
     int currentSignal = constrain(map(WiFi.RSSI(), -100, -30, 0, 100), 0, 100);
 
-    // Only send data if something changed or every 5 seconds
+    // Debounce Logic for Motor Switch
+    if (reading != lastMotorStat) { // Use lastMotorStat as 'lastReading' temporary
+       // State changed, but might be noise. We handle the actual stable state separately.
+       // Actually, let's keep it simple: Only update 'stableMotorState' if value persists
+    }
+    
+    // Better simpler debounce:
+    // Only accept a state change if it stays that way for > 50ms? 
+    // Or just throttle updates?
+    
+    // Let's go with: Read, wait 50ms, Read again. If same, valid.
+    // But we are in a loop.
+    
+    // Let's use the 'lastStatusUpdate' throttling but specificaly for motor state changes,
+    // we need to be sure.
+    
+    // If reading is different from known stable state
+    if (reading != stableMotorState) {
+       if ((millis() - lastDebounceTime) > debounceDelay) {
+         stableMotorState = reading; // Update stable state
+         lastDebounceTime = millis();
+       }
+    } else {
+       lastDebounceTime = millis(); // Reset timer if reading matches stable
+    }
+    
+    // Use stableMotorState for payload
+    String currentMotor = stableMotorState;
+
+    // Send data if Stable Motor Status changed (compared to what we Last Sent) OR other triggers
+    // We reuse 'lastMotorStat' to track what was SENT to server
     if (currentMotor != lastMotorStat || currentMode != lastSysMode || abs(currentSignal - lastWifiSignal) > 5 || millis() - lastStatusUpdate > 5000) {
         
         JsonDocument doc;
@@ -124,8 +161,29 @@ void webSocketEvent(WStype_t type, uint8_t * payload, size_t length) {
     }
 }
 
+#include <Ticker.h> // Ticker for LED blinking
+
+// LED Definition
+#define LED_PIN 2
+Ticker blinker;
+
+void tick() {
+  // Toggle LED state
+  int state = digitalRead(LED_PIN);
+  digitalWrite(LED_PIN, !state);
+}
+
+// Callback when entering AP Mode
+void configModeCallback(WiFiManager *myWiFiManager) {
+  Serial.println("Entered config mode");
+  Serial.println(WiFi.softAPIP());
+  // Start blinking LED every 0.3 seconds
+  blinker.attach(0.3, tick);
+}
+
 void setup() {
     Serial.begin(115200);
+    delay(1000); // Wait for Serial
     
     // Initialize Pins
     pinMode(RELAY_1, OUTPUT); digitalWrite(RELAY_1, LOW);
@@ -133,34 +191,60 @@ void setup() {
     pinMode(relay_3, OUTPUT); digitalWrite(relay_3, LOW);
     pinMode(SWITCH_1, INPUT_PULLUP);
     pinMode(SWITCH_2, INPUT_PULLUP);
+    
+    pinMode(LED_PIN, OUTPUT);
+    digitalWrite(LED_PIN, LOW); // Start LOW
 
-    // Watchdog Setup (Initialize early to catch boot loops)
+    // Watchdog Setup
+    esp_task_wdt_deinit();
     esp_task_wdt_config_t wdt_config = {
         .timeout_ms = WDT_TIMEOUT * 1000,
         .idle_core_mask = (1 << portNUM_PROCESSORS) - 1,
         .trigger_panic = true
     };
     esp_task_wdt_init(&wdt_config);
-    esp_task_wdt_add(NULL);
 
-    // WiFi Setup
-    WiFi.mode(WIFI_STA);
-    WiFi.setAutoReconnect(true); // Enable Auto Reconnect Hardware Level
-    WiFi.persistent(true);       // Save WiFi settings
+    // --- STANDARD NVS INIT START ---
+    
+    // 1. Initialize NVS
+    esp_err_t ret = nvs_flash_init();
+    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+      Serial.println("NVS Corruption Detected. Erasing...");
+      ESP_ERROR_CHECK(nvs_flash_erase());
+      ret = nvs_flash_init();
+    }
+    ESP_ERROR_CHECK(ret);
+
+    // 2. WiFiManager Setup
+    WiFi.setAutoReconnect(true);
+    WiFi.persistent(true);
     
     WiFiManager wm;
-    wm.setConfigPortalTimeout(180); // 3 Minutes timeout for hotspot
+    // wm.resetSettings(); // COMMENTED OUT: Settings will now be saved!
+    wm.setAPCallback(configModeCallback); // Set Blink Callback
+    wm.setConfigPortalTimeout(180); // 3 Minutes timeout
 
-    if (!wm.autoConnect("ESP32-Simple")) {
+    // --- STANDARD NVS INIT END ---
+
+    if (!wm.autoConnect("Mutho-Sech")) {
         Serial.println("Failed to connect. Restarting...");
         delay(3000);
         ESP.restart();
     }
 
+    // Connected!
+    blinker.detach(); // Stop blinking
+    digitalWrite(LED_PIN, HIGH); // Turn LED ON (Solid)
+
     Serial.println("WiFi Connected!");
     Serial.println("Current Version: " + String(currentFirmwareVersion));
 
     // Check for update ONCE at startup
+    
+    // Enable WDT monitoring for this task NOW, BEFORE OTA check
+    // This prevents "task not found" error during OTA write
+    esp_task_wdt_add(NULL);
+
     checkForFirmwareUpdate();
     
     // WebSocket Setup
@@ -200,12 +284,35 @@ void loop() {
     sendStatus();
 }
 
+bool isNewerVersion(String current, String latest) {
+    // Simple SemVer comparison (e.g. 1.1.3 vs 1.1.5)
+    // Returns true if latest > current
+    int c_major = 0, c_minor = 0, c_patch = 0;
+    int l_major = 0, l_minor = 0, l_patch = 0;
+    
+    sscanf(current.c_str(), "%d.%d.%d", &c_major, &c_minor, &c_patch);
+    sscanf(latest.c_str(), "%d.%d.%d", &l_major, &l_minor, &l_patch);
+    
+    if (l_major > c_major) return true;
+    if (l_major < c_major) return false;
+    
+    if (l_minor > c_minor) return true;
+    if (l_minor < c_minor) return false;
+    
+    if (l_patch > c_patch) return true;
+    
+    return false;
+}
+
 void checkForFirmwareUpdate() {
   Serial.println("Checking for firmware update...");
   if (WiFi.status() != WL_CONNECTED) return;
 
   // Step 1: Fetch the latest version
   String latestVersion = fetchLatestVersion();
+  // Remove trailing dots if any (User error protection)
+  while (latestVersion.endsWith(".")) latestVersion.remove(latestVersion.length()-1);
+  
   if (latestVersion == "") {
     Serial.println("Failed to fetch latest version");
     return;
@@ -214,13 +321,13 @@ void checkForFirmwareUpdate() {
   Serial.println("Current: " + String(currentFirmwareVersion));
   Serial.println("Latest: " + latestVersion);
 
-  // Step 2: Compare versions
-  if (latestVersion != currentFirmwareVersion) {
+  // Step 2: Compare versions properly
+  if (isNewerVersion(String(currentFirmwareVersion), latestVersion)) {
     Serial.println("New firmware available. Starting OTA update...");
     esp_task_wdt_reset(); // Reset WDT before heavy task
     downloadAndApplyFirmware();
   } else {
-    Serial.println("Device is up to date.");
+    Serial.println("Device is up to date (or newer).");
   }
 }
 
